@@ -279,7 +279,7 @@ def dump_frame(positions, velocities, out_file, frame, Npart, box_bounds):
         f.write(str(Npart)+"\n")
         f.write("ITEM: BOX BOUNDS pp pp pp\n")
         np.savetxt(f, box_bounds)
-        f.write("ITEM: ATOMS id type x y zz vx vy vz\n") # TO-DO: Need to adjust this to preserve dimensionality of the system
+        f.write("ITEM: ATOMS id type x y z vx vy vz\n") # TO-DO: Need to adjust this to preserve dimensionality of the system
 
         #   Stack the data into one array for quick writing
         for i in range(Npart):
