@@ -4,26 +4,36 @@ import numpy as np
 import math
 import random
 
-global boltzmann_constant, mass, sigma, epsilon, cutoff, cutoff_squared, Npart, box, timestep, timestep2, tail_correction, thermostat_frequency
+global boltzmann_constant, mass, sigma, epsilon, cutoff, cutoff_squared, Npart, ndim, box, timestep, timestep2, tail_correction, thermostat_frequency, init_file, temperature, num_equilibration, num_production, dump_frequency, seed, outfile, log_file
+
 ##################################################
 #   Key parameters - change these!
 ##################################################
 
 #   System parameters
-Npart = 500
-cutoff = 3.0
-density = 0.776
-box_length = (Npart / density) ** (1/3) 
-timestep = 0.005
-temperature = 0.850
+Npart = 500                                     #   number of particles
+cutoff = 3.0                                    #   cut off for the LJ potential
+density = 0.776                                 #   number density
+ndim = 3                                        #   dimensionality of the system
+timestep = 0.005                                #   MD timestep
+temperature = 0.850                             #   initial temperature of the system
+
+box_length = (Npart / density) ** (1/ndim)      #   determine the box lengths corresponding to input parameters
 
 #   Simulation parameters
-num_equilibration = 1000
-num_production = 2000
-dump_frequency = 10
-thermo_frequency = 1
+num_equilibration = 100                         #   number of equilibration (NVT) steps to perform
+num_production = 200                            #   number of production (NVE) steps to perform
+dump_frequency = 10                             #   how often to print configurations, in MD timesteps
+thermo_frequency = 1                            #   how often to print thermodynamic quantities, in MD timesteps
 
-thermostat_frequency = 1
+thermostat_frequency = 1                        #   how often to rescale velocities during euqilibration
+
+lattice = False                                 #   if True, generate a configuration using an FCC lattice.
+                                                #   if False, read an input configuration from a file
+init_file = "initial_config.conf"               #   name of the file containing an input configuration
+
+seed = 618131849621                             #   seed to use for the random number generator, used in debugging
+print("Seed for simulation is : ", seed)
 
 ##################################################
 #   Other parameters - Be careful when changing these!
@@ -38,14 +48,9 @@ sigma = 1
 epsilon = 1
 tail_correction = True
 
-#   Define the lattice to use for the inital configuration
-lattice = "fcc"
-
 #   Define the seed for the RNG and the names of the output files
-seed = random.randint(1000000,9999999) #618131849621
-print("Seed for simulation is : ", seed)
-outfile_name = "trajectory.lammpstrj"
-log_file_name = "MMD.csv"
+outfile = "trajectory.lammpstrj"
+log_file = "MMD.csv"
 
 # The command that runs the simulation is a function called "md_simulation()" and is called at the end of this file
 #   This is because we need to define all of the functions used to run the simulation before we can run it.
@@ -63,40 +68,49 @@ def progress_MD(positions, velocities, accelerations):
 
     #   Update the velocities using the formula:
     #       dv(t + dt) = (1/2)*a(t)*dt + (1/2)*a(t+dt)*dt
+    
+    #   Add the first term: (1/2)*a(t)*dt
     velocities += (1/2) * accelerations * timestep
 
-    #   Update accelerations
+    #   Update accelerations using the updated positions to get a(t+dt)
     accelerations = compute_accelerations(positions)
 
+    #   Add the second term: (1/2)*a(t+dt)*dt
     velocities += (1/2) * accelerations * timestep
 
     return positions, velocities, accelerations
 
 #   Take a set of vectors and find the minimum image equivalent of those vectors
+#       Wikipedia has a really good article covering this! https://en.wikipedia.org/wiki/Periodic_boundary_conditions
 def minimum_image(vectors, box):
+
+    #   In each dimension the minimum image convention is:
+    #       dx = dx - (nearbyint(dx / boxL_x) * boxL_x)
 
     minimum_image_vectors = vectors - (np.rint(vectors / box[None,:]) * box[None,:])
 
     return minimum_image_vectors
 
 #   Compute the truncated Lennard-Jones energy for a particle from a set of interparticle distances
-#       [Note] Unlike with forces, energy is a scalar quantity and so we return a scalar
 def lennard_jones_energy(distances):
 
-    #   Compute the magnitude of the distance vectors
-    r2 = np.sum( (distances ** 2) , axis = 1)
+    #   Compute the magnitude^2 of the distance vectors
+    # r2 = (distances[:,0] ** 2) + (distances[:,1] ** 2) + (distances[:,2] ** 2)
+    #   A more compact version of this line is
+    r2 = np.sum(distances ** 2, axis = 1)
 
     #   Check which of these distances fall outside the distance cut-off and ignore them
     cutoff_mask = np.less_equal(r2, cutoff_squared)
     r2 = r2[cutoff_mask]
 
-    #   Compute the actual distance
-    r = np.sqrt(r2)
+    #   Compute (1/r)^6 as a faster way of computing the LJ energy
+    r_neg2 = 1 / r2
+    r_neg6 = r_neg2 * r_neg2 * r_neg2
 
     #   The Lennard-Jones potential has the form:
     #       U = (4*epsilon) * [(sigma/r)^12 - (sigma/r)^6]
     #   [WIP] for now we work in reduced units so epsilon = 1 and sigma = 1
-    energy = 4 * (((1/r) ** 12) - ((1/r) ** 6))
+    energy = 4 * ((r_neg6 * r_neg6) - r_neg6)
 
     total_energy = np.sum(energy)
     
@@ -107,6 +121,8 @@ def lennard_jones_energy(distances):
 def lennard_jones_force(distances): # !!! WIP - check if this is right, I believe we need to seperate magnitude and direction. but I'm not 100% sure what the best way to handle that is 
     
     #   Compute the magnitude^2 of the distance vectors
+    # r2 = (distances[:,0] ** 2) + (distances[:,1] ** 2) + (distances[:,2] ** 2)
+    #   A more compact version of this line is
     r2 = np.sum(distances ** 2, axis = 1)
 
     #   Check which of these distances fall outside the distance cut-off and ignore them
@@ -114,13 +130,14 @@ def lennard_jones_force(distances): # !!! WIP - check if this is right, I believ
     r2 = r2[cutoff_mask]
     distances = distances[cutoff_mask,:]
 
-    #   Compute the actual distance
-    r = np.sqrt(r2)
+    #   Compute (1/r)^6 as a faster way of computing the LJ energy
+    r_neg2 = 1 / r2
+    r_neg6 = r_neg2 * r_neg2 * r_neg2
 
     #   The force enacted on a particle is equal to the gradient of the energy potential
     #   So, the force for a Lennard-Jones potential is given by:
-    #       F = (-24*epsilon) * [2(sigma/r)^14 - (sigma/r)^8]
-    forces = 48 * (((1/r) ** 14) - (0.5)*((1/r) ** 8))
+    #       F = (-48*epsilon) * [(sigma/r)^14 - (1/2)(sigma/r)^8]
+    forces = 48 * ((r_neg6 * r_neg6 * r_neg2) - (0.5)*(r_neg6 * r_neg2))
 
     #   Multiply the magnitude of the forces by normalised distance vectors to get a force vector with appropriate direction
     forces = forces[:,None] * distances
@@ -135,41 +152,6 @@ def lennard_jones_force(distances): # !!! WIP - check if this is right, I believ
 def maxwell_boltzmann(x, T):
     return (4*math.pi) * ((mass / (2 * math.pi * boltzmann_constant * T)) ** (3/2)) * (x ** 2) * np.exp(-((mass * (x**2))/(2 * boltzmann_constant * T)))
 
-#   Initialise a random configuration
-def init_positions_random(Npart, box):
-
-    #   Ensure the box is a numpy array
-    box = np.array(box)
-
-    # Create an array of (Number of particles x Number of dimensions) fractional coordinates
-    pos = rng.random((Npart,len(box)))
-
-
-    # Convert these to "real" coordinates by multiplying the fractional coordinates by the box dimensions
-    pos = pos * box
-
-    return pos
-
-#   Initialise a cubic lattice
-def init_positions_cubic(Npart, box):
-
-    #   Ensure the box is a numpy array
-    box = np.array(box)
-
-    #   Determine the smallest cubic number greater than Npart
-    grid_points = math.ceil(abs(Npart) ** (1/3))
-
-    axis_points = np.linspace(0,1,grid_points+1)[:-1]
-
-    x, y, z = np.meshgrid(axis_points, axis_points, axis_points, indexing='ij')
-
-    pos = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
-
-    # Convert these to "real" coordinates by multiplying the fractional coordinates by the box dimensions
-    pos = pos[:Npart] * box
-
-    return pos
-
 #   Initialise a face centred cubic lattice
 def init_positions_fcc(Npart, box):
 
@@ -180,7 +162,7 @@ def init_positions_fcc(Npart, box):
     #       This is used as the unit cell of an fcc lattice contains 4 particles
     num_unit_cells = math.ceil(abs(Npart/4) ** (1/3))
 
-    #   Define the positions of the unit cell, using an arbitraty lattice vector of 1
+    #   Define the atomic positions of the unit cell, using an arbitrary lattice vector of 1
     unit_cell = np.array([[0  , 0  , 0  ],
                           [1/2, 1/2, 0  ],
                           [1/2, 0  , 1/2],
@@ -196,7 +178,7 @@ def init_positions_fcc(Npart, box):
                     pos[(i*4):((i+1)*4),:] =  unit_cell + np.array([[nX,nY,nZ]])
                     i += 1
     else:
-        print("Error encountered with box dimensions in ffc lattice initalisation. Only 3D allowed.")
+        print("Error encountered with box dimensions in ffc lattice initalisation. Only 3D systems allowed.")
         exit()
 
     # Convert these to "real" coordinates by scalling the lattice coordinates by the box dimensions
@@ -204,46 +186,32 @@ def init_positions_fcc(Npart, box):
 
     return pos
 
-#   Initialise random velocities, drawn from either a:
-#   -   Uniform distribution 
-#   -   Boltzmann distribution
-#   -   Uniform directional distribution with all magnitudes set to 1
-#   and then scaled to a temperature T
-#   We use a position array as input to determine the number of particles and dimensionality of the system
-def init_velocities_random(positions, target_T, distribution="Boltzmann"):
+#   Initialise random velocities, drawn from a Boltzmann distribution and then scaled to a temperature T
+def init_velocities_random(target_T):
 
     # Initialise an array to store the velocities, with random numbers between 0 and 1 in each entry
 
-    velocities = rng.random(np.shape(positions))
-    velocities = velocities - np.array([0.5,0.5,0.5])
+    velocities = rng.random((Npart, ndim))
+    #   Velocities are drawn from values 0 to 1, we subtract 0.5 in each dimension so they can now vary from -0.5 to 0.5
+    velocities = velocities - (np.ones(ndim) * 0.5)
 
     # Normalise these velocities so they have a magnitude of 1
     # These can then be used as directional vectors that we add a magnitude to drawn from the desired distribution
     velocities = velocities / np.linalg.norm(velocities, axis=1)[:,None]
     
-    # Draw the velocity magnitudes
-    match distribution:
-        case "None":
-            
-            vel_magnitudes = np.ones(np.shape(velocities), dtype = float)
-
-        case "Uniform":
-            
-            dist = np.arange(0,1,0.0001)
-            vel_magnitudes = np.random.choice(dist)
-
-        case "Boltzmann":
-            
-            dist = np.arange(0,1,0.0001, dtype=float)
-            probabilities = maxwell_boltzmann(dist, target_T)
-            probabilities = probabilities / np.sum(probabilities)
-            vel_magnitudes = np.random.choice(dist, size= Npart, p = probabilities)
-
+    # Draw the velocity magnitudes from a Boltzmann distribution
+    dist = np.arange(0,1,0.0001, dtype=float)
+    probabilities = maxwell_boltzmann(dist, target_T)
+    probabilities = probabilities / np.sum(probabilities)
+    vel_magnitudes = rng.choice(dist, size= Npart, p = probabilities)
 
     #   Multiply the velocity directions by their magnitudes
     velocities = velocities * vel_magnitudes[:,None]
 
-    #   Make sure the overall momentum of the system is 0 (this avoids centre of mass drift in the simulation)
+    #   Make sure the overall momentum of the system is 0 (this avoids the flying ice cube effect)
+    #   Below is a condensed version of the following, repeated in each dimension
+    #       overall_vel_x = np.sum(velocities[:,0])
+    #       velocities[:,0] = velocities[:,0] - (overall_vel_x / Npart)
     velocities -= np.sum(velocities, axis = 0) / Npart
 
     #   Rescale the velocities to a target temperature
@@ -251,11 +219,50 @@ def init_velocities_random(positions, target_T, distribution="Boltzmann"):
 
     return velocities
 
+#   Load a configuration from a LAMMPS format dump file
+def load_LAMMPS(input_file):
+
+    with open(input_file, "r") as file:
+        file.readline()
+        file.readline()
+        Num_particles = int(file.readline().split()[0])
+        if Num_particles != Npart:
+            print("Error, number of particles specified does not match number of particles in the input file")
+            exit()
+        file.readline()
+        file.readline()
+        box_x_str = file.readline().split()[0:2]
+        box_y_str = file.readline().split()[0:2]
+        box_z_str = file.readline().split()[0:2]
+        box = np.array([ (float(box_x_str[1]) - float(box_x_str[0])) , (float(box_y_str[1]) - float(box_y_str[0])) , (float(box_z_str[1]) - float(box_z_str[0])) ])
+        file.readline()
+        file.readline()
+        file.readline()
+        mass = float(file.readline().split()[0])
+        file.readline()
+        file.readline()
+        file.readline()
+        #   Read in atomic positions and image flags
+        pos_and_flags = np.loadtxt(file, max_rows= Npart, usecols=(2,3,4,5,6,7))
+        positions = pos_and_flags[:,0:3]
+        image_flags = pos_and_flags[:,3:].astype(int)
+        file.readline()
+        file.readline()
+        file.readline()
+        #   Read in velocities
+        velocities = np.loadtxt(file, max_rows= Npart, usecols=(1,2,3))
+
+    return positions, image_flags, velocities
+
 #   Function to rescale velocities from a computed instantaneous temperature to a target temperature
 def velocity_rescaling(velocities, target_T):
     #   Compute the instantaneous temperature of the sample
-    kinetic_energy = np.sum( np.sum(np.square(velocities), axis=1))
-    temperature = (kinetic_energy) / (3 * boltzmann_constant * Npart)
+    #   Compute the total kinetic energies using the equation:
+    #       Ek = (1/2) * m * (v^2)
+    kinetic_energy = (1/2) * mass * np.sum(np.sum(np.square(velocities), axis=1))
+    #   Compute the instantaneous temperature using the equipartition theorem given by the equation:
+    #       <Ek> = (3N/2)*kB*T
+    temperature = (2*kinetic_energy) / (3 * boltzmann_constant * Npart)
 
     #   Scale the velocities based on the ratio (computed T/ target T)
     velocities = velocities * math.sqrt(target_T / temperature)
@@ -284,21 +291,17 @@ def compute_accelerations(positions):
 #       Prints output to a log file
 def compute_thermodynamics(positions, velocities, current_timestep, log_file):
 
-    #   Compute potential energy - WIP
-    #       [Note] -    Energies are almost computed when calculating the accelerations,
-    #                   it's an easy speed-up to calculate energies there
+    #   Compute potential energy
     potential_energy = 0
     for particle_i in range(Npart):
-        distances = positions[particle_i,:] - np.delete(positions,particle_i, axis=0)
+        distances = positions[particle_i,:] - positions[(particle_i+1):,:]      # by only looking at pairs of particles i and j where j > i we avoid double counting!
         distances = minimum_image(distances, box)
         potential_energy += lennard_jones_energy(distances)
-    #   Account for the double counting of particle pairs
-    potential_energy = potential_energy / 2
 
     #   Normalise by number of particles
     Ep_per_particle = potential_energy / Npart
 
-    #   Add a tail correction
+    #   Adding a tail correction
     #   Compute the tail correction for the truncated Lennard-Jones potential and add this to the overall energy
     if tail_correction == True:
         long_range_correction = (8/3) * math.pi * (Npart/np.prod(box)) * epsilon * (sigma**3) * (((1/3) * ((sigma / cutoff) ** 9)) - ((sigma / cutoff) ** 3) )
@@ -307,18 +310,19 @@ def compute_thermodynamics(positions, velocities, current_timestep, log_file):
     #   Compute the total kinetic energies using the equation:
     #       Ek = (1/2) * m * (v^2)
     #   Note that we use reduced units so the mass of the particles is 1m
-    kinetic_energy = np.sum((1/2) * np.sum(np.square(velocities), axis=1))
+    kinetic_energy = (1/2) * mass * np.sum(np.sum(np.square(velocities), axis=1))
 
     #   Normalise by the number of particles
     Ek_per_particle = kinetic_energy / Npart
-
-    #   Compute total energy
-    E_total = Ek_per_particle + Ep_per_particle
 
     #   Compute the instantaneous temperature using the equipartition theorem given by the equation:
     #       <Ek> = (3N/2)*kB*T
     temperature = (2*Ek_per_particle) / (3 * boltzmann_constant)
 
+    #   Compute total energy
+    E_total = Ek_per_particle + Ep_per_particle
+
+    #   Compute the system density (this should always be constant!!!)
     density = Npart / np.prod(box)
 
     with open(log_file, "a") as f:
@@ -336,9 +340,8 @@ def dump_frame(positions, image_flags, velocities, out_file, frame, Npart, box_b
         f.write(str(Npart)+"\n")
         f.write("ITEM: BOX BOUNDS pp pp pp\n")
         np.savetxt(f, box_bounds)
-        f.write("ITEM: ATOMS id type x y z ix iy iz vx vy vz\n") # TO-DO: Need to adjust this to preserve dimensionality of the system
+        f.write("ITEM: ATOMS id type x y z ix iy iz vx vy vz\n") 
 
-        #   Stack the data into one array for quick writing
         for i in range(Npart):
             f.write(str(i)+" 1 "+str(positions[i,0])+" "+str(positions[i,1])+" "+str(positions[i,2])+" "
                 +str(image_flags[i,0])+" "+str(image_flags[i,1])+" "+str(image_flags[i,2])+" "
@@ -347,7 +350,7 @@ def dump_frame(positions, image_flags, velocities, out_file, frame, Npart, box_b
     print("frame sucessfully dumped at timestep: ", frame)
 
 def dump_restart(positions, image_flags, velocities, out_file, frame, Npart, box_bounds):
-    with open("initial_config.dat", "w") as f:
+    with open(out_file, "w") as f:
             f.write("LAMMPS data file via write_data, version 23 Jun 2022, timestep = 10000000\n"+
                     "\n"+
                     str(Npart)+" atoms\n"+
@@ -375,7 +378,7 @@ def dump_restart(positions, image_flags, velocities, out_file, frame, Npart, box
 
 
 #   Main Script
-def md_simulation(Npart, temperature, box, num_equilibration, num_timesteps, dump_frequency, seed, outfile, log_file, lattice="cubic", distribution="Boltzmann"):
+def md_simulation():
     print("Setting up simulation")
 
     #   Set up a variable to keep track of the current timestep
@@ -393,34 +396,30 @@ def md_simulation(Npart, temperature, box, num_equilibration, num_timesteps, dum
     with open(outfile, "w+") as f:
         f.write("")
     with open(log_file, "w+") as f:
-            f.write("TIMESTEP TEMPERATURE DENSITY E_total E_kinetic E_potential\n")
+            f.write("TIMESTEP TEMPERATURE DENSITY E_total E_kinetic E_potential # seed = "+str(seed)+"\n")
 
-    #   Initialise the starting positions of the atoms
-    # positions = init_positions_random(Npart, box)
+    #   Initialise starting positions
+    if lattice == True:
+        positions = init_positions_fcc(Npart, box)
 
-    match lattice:
-        case "cubic":
-            positions = init_positions_cubic(Npart, box)
-        case "fcc":
-            positions = init_positions_fcc(Npart, box)
-        case _:
-            positions = init_positions_random(Npart, box)
+        #   Prepare image flags, these keep track of how many boxes an atom has moved through
+        image_flags = np.zeros(np.shape(positions))
+        image_flags = np.zeros((Npart,ndim))
+    
+        #   Give each atom a starting velocity
+        velocities = init_velocities_random(temperature)
+        
+    else:
+        positions, image_flags, velocities = load_LAMMPS(init_file)
 
-
-    #   Prepare image flags, these keep track of how many boxes an atom has moved through
-    image_flags = np.zeros(np.shape(positions))
-
-    #   Give each atom a starting velocity
-    velocities = init_velocities_random(positions, temperature, distribution= distribution)
-
-    #   Compute the starting accelerations
+    
+    #   Initialise an array to store accelerations
     accelerations = np.zeros(np.shape(positions))
 
     #   Write the starting configuration to the output file
     compute_thermodynamics(positions, velocities, current_timestep, log_file)
     dump_frame(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
-
-    dump_restart(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
+    dump_restart(positions, image_flags, velocities, "initial_config.dat", current_timestep, Npart, box_bounds)
 
     #   Equilibration steps
     for current_timestep in np.arange(1,(num_equilibration+1)):
@@ -429,20 +428,19 @@ def md_simulation(Npart, temperature, box, num_equilibration, num_timesteps, dum
             if current_timestep % thermostat_frequency == 0:
                 #   Rescale the velocities to the target temperature
                 velocities = velocity_rescaling(velocities, temperature)
-                # velocities = init_velocities_random(positions, temperature, distribution= distribution)
 
             positions, velocities, accelerations = progress_MD(positions, velocities, accelerations) 
     
-            #   Print configurations every N timesteps
+            #   Print configurations every thermo_frequency timesteps
             if current_timestep % thermo_frequency == 0:
                 compute_thermodynamics(positions, velocities, current_timestep, log_file)
     
-            #   Print configurations every N timesteps
+            #   Print configurations every dump_frequency timesteps
             if current_timestep % dump_frequency == 0:
                 dump_frame(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
 
     #   Production steps
-    for current_timestep in np.arange(1,(num_timesteps+1)):
+    for current_timestep in np.arange(1,(num_production+1)):
 
         #   Add on the quilibration timesteps
         current_timestep = current_timestep + num_equilibration
@@ -457,6 +455,9 @@ def md_simulation(Npart, temperature, box, num_equilibration, num_timesteps, dum
         if current_timestep % dump_frequency == 0:
             dump_frame(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
 
+    dump_restart(positions, image_flags, velocities, "final_config.conf", current_timestep, Npart, box_bounds)
+    print("Simulation finished successfully")
+
 ##################################################
 #   Setting up system constants
 ##################################################
@@ -467,4 +468,4 @@ timestep2 = timestep ** 2
 #   Note that non-cubic boxes are "allowed" but may cause unexpected behaviour when generating initial configurations
 box = np.array([box_length,box_length,box_length])
 
-md_simulation(Npart, temperature, box, num_equilibration, num_production, dump_frequency, seed, outfile_name, log_file_name, lattice=lattice)
+md_simulation()
