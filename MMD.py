@@ -21,16 +21,19 @@ temperature = 0.850                             #   initial temperature of the s
 box_length = (Npart / density) ** (1/ndim)      #   determine the box lengths corresponding to input parameters
 
 #   Simulation parameters
-num_equilibration = 100                         #   number of equilibration (NVT) steps to perform
-num_production = 200                            #   number of production (NVE) steps to perform
+num_equilibration = 0                         #   number of equilibration (NVT) steps to perform
+num_production = 100                            #   number of production (NVE) steps to perform
 dump_frequency = 10                             #   how often to print configurations, in MD timesteps
-thermo_frequency = 1                            #   how often to print thermodynamic quantities, in MD timesteps
+thermo_frequency = 10                            #   how often to print thermodynamic quantities, in MD timesteps
 
 thermostat_frequency = 1                        #   how often to rescale velocities during euqilibration
 
 lattice = False                                 #   if True, generate a configuration using an FCC lattice.
                                                 #   if False, read an input configuration from a file
-init_file = "initial_config.conf"               #   name of the file containing an input configuration
+init_file = "config.conf"               #   name of the file containing an input configuration
+
+
+tail_correction = False
 
 seed = 618131849621                             #   seed to use for the random number generator, used in debugging
 print("Seed for simulation is : ", seed)
@@ -46,7 +49,6 @@ boltzmann_constant = 1  #   We set kB = 1 to be working in reduced units of temp
 mass = 1
 sigma = 1
 epsilon = 1
-tail_correction = True
 
 #   Define the seed for the RNG and the names of the output files
 outfile = "trajectory.lammpstrj"
@@ -60,11 +62,15 @@ log_file = "MMD.csv"
 ##################################################
 
 #   A single MD timestep
-def progress_MD(positions, velocities, accelerations):
+def progress_MD(positions, velocities, accelerations, image_flags):
 
     #   Update positions using:
     #       dr = v*dt + (1/2)*a*(dt^2)
     positions += (velocities*timestep) + ((1/2) * accelerations * timestep2)
+
+    #   Wrap positions back inside the simulation box (asumes a box with origin at 0,0,0)
+    image_flags += np.floor(positions / box[None,:]).astype(int)
+    positions = positions - (np.floor(positions / box[None,:]) * box[None,:])
 
     #   Update the velocities using the formula:
     #       dv(t + dt) = (1/2)*a(t)*dt + (1/2)*a(t+dt)*dt
@@ -293,7 +299,7 @@ def compute_thermodynamics(positions, velocities, current_timestep, log_file):
 
     #   Compute potential energy
     potential_energy = 0
-    for particle_i in range(Npart):
+    for particle_i in range(Npart-1):
         distances = positions[particle_i,:] - positions[(particle_i+1):,:]      # by only looking at pairs of particles i and j where j > i we avoid double counting!
         distances = minimum_image(distances, box)
         potential_energy += lennard_jones_energy(distances)
@@ -414,30 +420,30 @@ def md_simulation():
 
     
     #   Initialise an array to store accelerations
-    accelerations = np.zeros(np.shape(positions))
+    accelerations = compute_accelerations(positions)
 
     #   Write the starting configuration to the output file
     compute_thermodynamics(positions, velocities, current_timestep, log_file)
     dump_frame(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
-    dump_restart(positions, image_flags, velocities, "initial_config.dat", current_timestep, Npart, box_bounds)
+    dump_restart(positions, image_flags, velocities, "initial_config.conf", current_timestep, Npart, box_bounds)
 
     #   Equilibration steps
     for current_timestep in np.arange(1,(num_equilibration+1)):
 
-            #   If on a velocity-rescaling timestep
-            if current_timestep % thermostat_frequency == 0:
-                #   Rescale the velocities to the target temperature
-                velocities = velocity_rescaling(velocities, temperature)
+        #   If on a velocity-rescaling timestep
+        if current_timestep % thermostat_frequency == 0:
+            #   Rescale the velocities to the target temperature
+            velocities = velocity_rescaling(velocities, temperature)
 
-            positions, velocities, accelerations = progress_MD(positions, velocities, accelerations) 
-    
-            #   Print configurations every thermo_frequency timesteps
-            if current_timestep % thermo_frequency == 0:
-                compute_thermodynamics(positions, velocities, current_timestep, log_file)
-    
-            #   Print configurations every dump_frequency timesteps
-            if current_timestep % dump_frequency == 0:
-                dump_frame(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
+        positions, velocities, accelerations = progress_MD(positions, velocities, accelerations, image_flags) 
+
+        #   Print configurations every thermo_frequency timesteps
+        if current_timestep % thermo_frequency == 0:
+            compute_thermodynamics(positions, velocities, current_timestep, log_file)
+
+        #   Print configurations every dump_frequency timesteps
+        if current_timestep % dump_frequency == 0:
+            dump_frame(positions, image_flags, velocities, outfile, current_timestep, Npart, box_bounds)
 
     #   Production steps
     for current_timestep in np.arange(1,(num_production+1)):
@@ -445,7 +451,7 @@ def md_simulation():
         #   Add on the quilibration timesteps
         current_timestep = current_timestep + num_equilibration
 
-        positions, velocities, accelerations = progress_MD(positions, velocities, accelerations)
+        positions, velocities, accelerations = progress_MD(positions, velocities, accelerations, image_flags)
 
         #   Print configurations every N timesteps
         if current_timestep % thermo_frequency == 0:
