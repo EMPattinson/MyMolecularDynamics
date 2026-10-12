@@ -1,0 +1,43 @@
+#Essential definitions
+units           lj                                      #Units type: Lennard-Jones
+atom_style      atomic                                  #Atom Style: Atoms
+dimension 3
+boundary p p p
+
+read_data ./config.conf 
+
+#Parameters for production run
+variable        nprod  equal 10000            #Production length (in timesteps)
+
+#System Size: Set Nmols and density, get volume
+variable        Nmols equal 500                       #Specify number of LJ molecules
+
+#Molecular Model
+# NOTE: This block must be after the "System Volume" section
+pair_style      lj/cut 3.0                             #Pair potential is Lennard-Jones, with linear-force shift tail correction
+                                                        #  Truncation radius is 2.5sigma
+pair_coeff      1 1 1.0 1.0                             #Pure Lennard-Jones, use sigma=1, epsilon=1
+mass            1 1.0                                   #Pure Lennard-Jones, use mass=1
+
+#Neighbor List
+neighbor        0.5 bin                                 #Specify the skin distance (padding beyond the cutoff)
+neigh_modify    delay 0 every 10 check yes              #Adjust the default neighbor list:
+                                                        #  (delay 0)
+                                                        #  (every 10)
+                                                        #  (check yes)
+
+#Ensemble Setup
+fix		1 all nve 
+timestep	0.005
+
+#Output setup for equilibration stage
+thermo          1                                   #Specify the interval between screen output of thermodynamic averages
+thermo_style custom step temp pe ke etotal
+
+#   Generate a simulation trajectory
+dump		unwrapped all custom 10 LJ_NVE.lammpstrj id xu yu zu
+dump_modify	unwrapped sort id
+
+#Run production!
+run             ${nprod}                          #Run the simulation
+
