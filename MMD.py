@@ -112,7 +112,7 @@ def lennard_jones_energy(distances):
     r2 = r2[cutoff_mask]
 
     #   Compute (1/r)^6 as a faster way of computing the LJ energy
-    r_neg2 = sigma / r2
+    r_neg2 = (sigma**2) / r2
     r_neg6 = r_neg2 * r_neg2 * r_neg2
 
     #   The Lennard-Jones potential has the form:
@@ -138,7 +138,7 @@ def lennard_jones_force(distances): # !!! WIP - check if this is right, I believ
     distances = distances[cutoff_mask,:]
 
     #   Compute (1/r)^6 as a faster way of computing the LJ energy
-    r_neg2 = sigma / r2
+    r_neg2 = (sigma**2) / r2
     r_neg6 = r_neg2 * r_neg2 * r_neg2
 
     #   The force enacted on a particle is equal to the gradient of the energy potential
